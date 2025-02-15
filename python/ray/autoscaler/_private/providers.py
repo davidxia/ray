@@ -114,6 +114,14 @@ def _import_kuberay(provider_config):
     return KubeRayNodeProvider
 
 
+def _import_remote_kuberay(provider_config):
+    from ray.autoscaler._private.remote_kuberay.node_provider import (
+        RemoteKubeRayNodeProvider,
+    )
+
+    return RemoteKubeRayNodeProvider
+
+
 def _import_aliyun(provider_config):
     from ray.autoscaler._private.aliyun.node_provider import AliyunNodeProvider
 
@@ -188,6 +196,12 @@ def _load_aliyun_defaults_config():
     return os.path.join(os.path.dirname(ray_aliyun.__file__), "defaults.yaml")
 
 
+def _load_remote_kuberay_defaults_config():
+    import ray.autoscaler.remote_kuberay as ray_remote_kuberay
+
+    return os.path.join(os.path.dirname(ray_remote_kuberay.__file__), "defaults.yaml")
+
+
 def _import_external(provider_config):
     provider_cls = load_function_or_class(path=provider_config["module"])
     return provider_cls
@@ -204,6 +218,7 @@ _NODE_PROVIDERS = {
     "azure": _import_azure,
     "kubernetes": _import_kubernetes,
     "kuberay": _import_kuberay,
+    "remote_kuberay": _import_remote_kuberay,
     "aliyun": _import_aliyun,
     "external": _import_external,  # Import an external module
     "spark": _import_spark,
@@ -233,6 +248,7 @@ _DEFAULT_CONFIGS = {
     "azure": _load_azure_defaults_config,
     "aliyun": _load_aliyun_defaults_config,
     "kubernetes": _load_kubernetes_defaults_config,
+    "remote_kuberay": _load_remote_kuberay_defaults_config,
     "vsphere": _load_vsphere_defaults_config,
     "readonly": _load_read_only_defaults_config,
 }

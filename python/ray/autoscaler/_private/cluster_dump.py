@@ -379,14 +379,26 @@ def create_and_get_archive_from_remote_node(
         Path to a temporary file containing the node's collected data.
 
     """
+    # cmd = [
+    #     "ssh",
+    #     "-o StrictHostKeyChecking=no",
+    #     "-o UserKnownHostsFile=/dev/null",
+    #     "-o LogLevel=ERROR",
+    #     "-i",
+    #     remote_node.ssh_key,
+    #     f"{remote_node.ssh_user}@{remote_node.host}",
+    # ]
+    # TODO (dxia): we need to `kubectl exec` if the provider is remote_kuberay
     cmd = [
-        "ssh",
-        "-o StrictHostKeyChecking=no",
-        "-o UserKnownHostsFile=/dev/null",
-        "-o LogLevel=ERROR",
-        "-i",
-        remote_node.ssh_key,
-        f"{remote_node.ssh_user}@{remote_node.host}",
+        "kubectl",
+        "--context",
+        "gke_kubeflow-platform_europe-west4-b_ml-compute-1",
+        "--namespace",
+        "hyperkube",
+        "exec",
+        "--stdin",
+        "--tty",
+        remote_node.host,
     ]
 
     if remote_node.docker_container:
@@ -413,6 +425,8 @@ def create_and_get_archive_from_remote_node(
     cat = "node" if not remote_node.is_head else "head"
 
     cli_logger.print(f"Collecting data from remote node: {remote_node.host}")
+    # import ipdb; ipdb.set_trace()
+    print(f"CMD: {cmd}")
     tmp = tempfile.mkstemp(prefix=f"ray_{cat}_{remote_node.host}_", suffix=".tar.gz")[1]
     with open(tmp, "wb") as fp:
         try:
@@ -573,9 +587,12 @@ def get_info_from_ray_cluster_config(
     head_nodes = provider.non_terminated_nodes({TAG_RAY_NODE_KIND: NODE_KIND_HEAD})
     worker_nodes = provider.non_terminated_nodes({TAG_RAY_NODE_KIND: NODE_KIND_WORKER})
 
+    # TODO (dxia): very wasteful with remote_kuberay provider since one call is all we need to get the Pod IPs
     hosts = [provider.external_ip(node) for node in head_nodes + worker_nodes]
-    ssh_user = config["auth"]["ssh_user"]
-    ssh_key = config["auth"]["ssh_private_key"]
+    ssh_user, ssh_key = "", ""
+    if config["provider"]["type"] != "remote_kuberay":
+        ssh_user = config["auth"]["ssh_user"]
+        ssh_key = config["auth"]["ssh_private_key"]
 
     docker = None
     docker_config = config.get("docker", None)
@@ -612,7 +629,9 @@ def _info_from_params(
 
     cluster_name = None
 
+    import ipdb; ipdb.set_trace()
     if cluster:
+        # TODO (dxia): h is a list of IP strings. For remote_kuberay, we need the Pod names.
         h, u, k, d, cluster_name = get_info_from_ray_cluster_config(cluster)
 
         ssh_user = ssh_user or u

@@ -2,7 +2,11 @@ import logging
 from types import ModuleType
 from typing import Any, Dict, List, Optional
 
-from ray.autoscaler._private.command_runner import DockerCommandRunner, SSHCommandRunner
+from ray.autoscaler._private.command_runner import (
+    DockerCommandRunner,
+    KubeCommandRunner,
+    SSHCommandRunner,
+)
 from ray.autoscaler.command_runner import CommandRunnerInterface
 from ray.util.annotations import DeveloperAPI
 
@@ -232,6 +236,8 @@ class NodeProvider:
         }
         if docker_config and docker_config["container_name"] != "":
             return DockerCommandRunner(docker_config, **common_args)
+        elif self.provider_config.get("type") == "remote_kuberay":
+            return KubeCommandRunner(**common_args)
         else:
             return SSHCommandRunner(**common_args)
 

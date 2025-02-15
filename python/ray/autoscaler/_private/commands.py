@@ -1063,6 +1063,8 @@ def attach_cluster(
     else:
         if new:
             raise ValueError("--new only makes sense if passing --screen or --tmux")
+        # TODO (dxia): this is ignored right now with remote_kuberay provider's attach implementation. Is that OK?
+        # Warn user that certain flags are ignore if used with remote_kuberay?
         cmd = "$SHELL"
 
     exec_cluster(

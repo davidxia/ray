@@ -1,0 +1,5 @@
+cluster_name: dxia-test
+provider:
+    type: kuberay2
+    context: gke_kubeflow-platform_europe-west4-b_ml-compute-1
+    namespace: hyperkube

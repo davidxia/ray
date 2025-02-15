@@ -7,7 +7,7 @@ import sys
 import time
 from getpass import getuser
 from shlex import quote
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple, Union
 
 import click
 
@@ -919,3 +919,207 @@ class DockerCommandRunner(CommandRunnerInterface):
         from ray.autoscaler.sdk import get_docker_host_mount_location
 
         return get_docker_host_mount_location(cluster_name)
+
+
+class KubeCommandRunner(CommandRunnerInterface):
+    def __init__(
+        self,
+        log_prefix,
+        node_id,
+        provider,
+        auth_config,
+        cluster_name,
+        process_runner,
+        use_internal_ip,
+    ):
+        self.cluster_name = cluster_name
+        self.process_runner = process_runner
+        self.node_id = node_id
+        # self.use_internal_ip = use_internal_ip
+        self.provider = provider
+
+    def _get_node_ip(self):
+        if self.use_internal_ip:
+            return self.provider.internal_ip(self.node_id)
+        else:
+            return self.provider.external_ip(self.node_id)
+
+    def _wait_for_ip(self, deadline):
+        # if we have IP do not print waiting info
+        ip = self._get_node_ip()
+        if ip is not None:
+            cli_logger.labeled_value("Fetched IP", ip)
+            return ip
+
+        interval = AUTOSCALER_NODE_SSH_INTERVAL_S
+        with cli_logger.group("Waiting for IP"):
+            while time.time() < deadline and not self.provider.is_terminated(
+                self.node_id
+            ):
+                ip = self._get_node_ip()
+                if ip is not None:
+                    cli_logger.labeled_value("Received", ip)
+                    return ip
+                cli_logger.print(
+                    "Not yet available, retrying in {} seconds", cf.bold(str(interval))
+                )
+                time.sleep(interval)
+
+        return None
+
+    def _set_ssh_ip_if_required(self):
+        if self.ssh_ip is not None:
+            return
+
+        # We assume that this never changes.
+        #   I think that's reasonable.
+        deadline = time.time() + AUTOSCALER_NODE_START_WAIT_S
+        with LogTimer(self.log_prefix + "Got IP"):
+            ip = self._wait_for_ip(deadline)
+
+            cli_logger.doassert(ip is not None, "Could not get node IP.")  # todo: msg
+            assert ip is not None, "Unable to find IP of node"
+
+        self.ssh_ip = ip
+
+        # This should run before any SSH commands and therefore ensure that
+        #   the ControlPath directory exists, allowing SSH to maintain
+        #   persistent sessions later on.
+        try:
+            os.makedirs(self.ssh_control_path, mode=0o700, exist_ok=True)
+        except OSError as e:
+            cli_logger.warning("{}", str(e))  # todo: msg
+
+    def run(
+        self,
+        cmd: Optional[str] = None,
+        timeout: int = 120,
+        exit_on_fail: bool = False,
+        port_forward: Optional[Union[List[Tuple[int, int]], Tuple[int, int]]] = None,
+        with_output: bool = False,
+        environment_variables: Optional[Dict[str, object]] = None,  # unused argument
+        run_env: str = "auto",  # unused argument
+        ssh_options_override_ssh_key: str = "",  # unused argument
+        shutdown_after_run: bool = False,  # unused argument
+    ) -> str:
+        # ) -> Union[Any, int]:
+        # TODO (dxia): Do we have to shell out to kubectl? If so, it has to be
+        # installed. Fail with actionable error message if not installed
+        # or if the user is not authenticated.
+        final_cmd = ["kubectl"]
+        if self.provider.context:
+            final_cmd.extend(["--context", self.provider.context])
+
+        final_cmd.extend(
+            [
+                "--namespace",
+                self.provider.namespace,
+            ]
+        )
+
+        if port_forward:
+            port_forward_args = []
+
+            with cli_logger.group("Forwarding ports"):
+                if not isinstance(port_forward, list):
+                    port_forward = [port_forward]
+                for local, remote in port_forward:
+                    cli_logger.verbose(
+                        "Forwarding port {} to port {} on localhost.",
+                        cf.bold(local),
+                        cf.bold(remote),
+                    )
+                    port_forward_args.append(f"{local}:{remote}")
+
+            final_cmd.extend(
+                [
+                    "port-forward",
+                    f"pods/{self.node_id}",
+                    "--pod-running-timeout",
+                    f"{timeout}s",
+                ]
+            )
+            final_cmd.extend(port_forward_args)
+        else:
+            final_cmd.extend(
+                [
+                    "exec",
+                    "--stdin",
+                    "--tty",
+                    "--pod-running-timeout",
+                    f"{timeout}s",
+                    self.node_id,
+                    "--",
+                    # TODO (dxia): is hardcoding bash OK?
+                    "bash",
+                ]
+            )
+
+            if cmd:
+                final_cmd.extend(["-c", cmd])
+
+        cli_logger.verbose("Running `{}`", cf.bold(" ".join(final_cmd)))
+        return run_cmd_redirected(
+            final_cmd,
+            process_runner=self.process_runner,
+            silent=False,
+            use_login_shells=is_using_login_shells(),
+        )
+
+    def _create_rsync_filter_args(self, options):
+        rsync_excludes = options.get("rsync_exclude") or []
+        rsync_filters = options.get("rsync_filter") or []
+
+        exclude_args = [
+            ["--exclude", rsync_exclude] for rsync_exclude in rsync_excludes
+        ]
+        filter_args = [
+            ["--filter", "dir-merge,- {}".format(rsync_filter)]
+            for rsync_filter in rsync_filters
+        ]
+
+        # Combine and flatten the two lists
+        return [arg for args_list in exclude_args + filter_args for arg in args_list]
+
+    def run_rsync_up(self, source, target, options=None):
+        self._set_ssh_ip_if_required()
+        options = options or {}
+
+        command = ["rsync"]
+        command += [
+            "--rsh",
+            subprocess.list2cmdline(
+                ["ssh"] + self.ssh_options.to_ssh_options_list(timeout=120)
+            ),
+        ]
+        command += ["-avz"]
+        command += self._create_rsync_filter_args(options=options)
+        command += [source, "{}@{}:{}".format(self.ssh_user, self.ssh_ip, target)]
+        cli_logger.verbose("Running `{}`", cf.bold(" ".join(command)))
+        self._run_helper(command, silent=is_rsync_silent())
+
+    def run_rsync_down(self, source, target, options=None):
+        self._set_ssh_ip_if_required()
+
+        command = ["rsync"]
+        command += [
+            "--rsh",
+            subprocess.list2cmdline(
+                ["ssh"] + self.ssh_options.to_ssh_options_list(timeout=120)
+            ),
+        ]
+        command += ["-avz"]
+        command += self._create_rsync_filter_args(options=options)
+        command += ["{}@{}:{}".format(self.ssh_user, self.ssh_ip, source), target]
+        cli_logger.verbose("Running `{}`", cf.bold(" ".join(command)))
+        self._run_helper(command, silent=is_rsync_silent())
+
+    def remote_shell_command_str(self):
+        if self.ssh_private_key:
+            return "ssh -o IdentitiesOnly=yes -i {} {}@{}\n".format(
+                self.ssh_private_key, self.ssh_user, self.ssh_ip
+            )
+        else:
+            return "ssh -o IdentitiesOnly=yes {}@{}\n".format(
+                self.ssh_user, self.ssh_ip
+            )

@@ -1,0 +1,6 @@
+cluster_name: dxia-test
+provider:
+    type: remote_kuberay
+    # TODO (dxia): right now current context is used if this is absent. Should we require an explicit context?
+    context: gke_kubeflow-platform_europe-west4-b_ml-compute-1
+    namespace: hyperkube
